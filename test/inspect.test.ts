@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { inspectToolCall } from "../src/shared/inspect.js";
-import { DEFAULT_CONFIG, parseSecretRules, type GuardConfig } from "../src/shared/config.js";
+import {
+	DEFAULT_CONFIG,
+	loadConfig,
+	parseSecretRules,
+	type GuardConfig,
+} from "../src/shared/config.js";
 import { createInitialState, grantKey, recordBlock } from "../src/shared/state.js";
 
 const cfg = (over: Partial<GuardConfig> = {}): GuardConfig => ({ ...DEFAULT_CONFIG, ...over });
@@ -79,6 +84,82 @@ test("state counts blocks and keeps a bounded history", () => {
 	assert.equal(state.history[0].target, ".env29");
 });
 
+test("the shipped default is the human-in-the-loop mode", () => {
+	assert.equal(DEFAULT_CONFIG.mode, "enforce", "enforce = block and ask the user");
+	assert.ok(DEFAULT_CONFIG.approvalTimeoutMs > 0, "silence must auto-deny, not hang");
+	assert.equal(loadConfig("/nonexistent-project", "/nonexistent-global").mode, "enforce");
+});
+
+test("a project config arriving with a clone cannot disable the guard", async () => {
+	const { loadConfig, projectConfigPath } = await import("../src/shared/config.js");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "sg-hostile-"));
+	const globalPath = path.join(root, "pi-secret-guard.json");
+	const project = path.join(root, "repo");
+	fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+
+	for (const hostile of [{ mode: "off" }, { mode: "redact-only" }]) {
+		fs.writeFileSync(projectConfigPath(project), JSON.stringify(hostile), "utf8");
+		const merged = loadConfig(project, globalPath);
+		assert.equal(merged.mode, "enforce", `project ${hostile.mode} must not win`);
+	}
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a project config may tighten but never lengthen", async () => {
+	const { loadConfig, saveGlobalConfig, projectConfigPath } = await import(
+		"../src/shared/config.js"
+	);
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "sg-tighten-"));
+	const globalPath = path.join(root, "pi-secret-guard.json");
+	const project = path.join(root, "repo");
+	fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+
+	// Shorter window: a project may insist on a faster auto-deny.
+	fs.writeFileSync(projectConfigPath(project), JSON.stringify({ approvalTimeoutMs: 1000 }), "utf8");
+	assert.equal(loadConfig(project, globalPath).approvalTimeoutMs, 1000);
+
+	// Longer window: ignored, the global 5000 stands.
+	fs.writeFileSync(projectConfigPath(project), JSON.stringify({ approvalTimeoutMs: 60000 }), "utf8");
+	assert.equal(loadConfig(project, globalPath).approvalTimeoutMs, 5000);
+
+	// Only the global file may widen it, and only its own user may.
+	saveGlobalConfig(cfg({ approvalTimeoutMs: 60000 }), globalPath);
+	assert.equal(loadConfig(project, globalPath).approvalTimeoutMs, 60000);
+
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a project config may still tighten the other switches", async () => {
+	const { loadConfig, projectConfigPath } = await import("../src/shared/config.js");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "sg-tighten2-"));
+	const globalPath = path.join(root, "pi-secret-guard.json");
+	const project = path.join(root, "repo");
+	fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+
+	fs.writeFileSync(
+		projectConfigPath(project),
+		JSON.stringify({ redactOutput: false, allowWriteToSecrets: false }),
+		"utf8",
+	);
+	const merged = loadConfig(project, globalPath);
+	assert.equal(merged.redactOutput, true, "a project must not switch redaction off");
+	assert.equal(merged.allowWriteToSecrets, false, "guarding writes is a tightening");
+
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
 test("config cascade: project file overrides global, defaults fill the gaps", async () => {
 	const { loadConfig, saveGlobalConfig, projectConfigPath } = await import(
 		"../src/shared/config.js"
@@ -95,19 +176,17 @@ test("config cascade: project file overrides global, defaults fill the gaps", as
 	// No files at all -> defaults.
 	assert.equal(loadConfig(project, globalPath).mode, "enforce");
 
+	// The global layer is the user's own, so it may set the mode and the keys
+	// it leaves out still inherit the defaults rather than resetting.
 	saveGlobalConfig(cfg({ mode: "redact-only", approvalTimeoutMs: 1000 }), globalPath);
-	assert.equal(loadConfig(project, globalPath).mode, "redact-only");
-
-	// Project wins over global; keys it does not set still inherit.
-	fs.writeFileSync(
-		path.join(project, ".pi", "pi-secret-guard.json"),
-		JSON.stringify({ mode: "off" }),
-		"utf8",
-	);
-	const merged = loadConfig(project, globalPath);
-	assert.equal(merged.mode, "off");
-	assert.equal(merged.approvalTimeoutMs, 1000, "unset keys must inherit, not reset");
+	const fromGlobal = loadConfig(project, globalPath);
+	assert.equal(fromGlobal.mode, "redact-only");
+	assert.equal(fromGlobal.approvalTimeoutMs, 1000);
+	assert.equal(fromGlobal.redactOutput, true, "unset keys must inherit, not reset");
 	assert.equal(projectConfigPath(project), path.join(project, ".pi", "pi-secret-guard.json"));
+
+	// No project file -> the global layer stands untouched.
+	assert.equal(loadConfig(path.join(root, "no-project"), globalPath).mode, "redact-only");
 
 	fs.rmSync(root, { recursive: true, force: true });
 });

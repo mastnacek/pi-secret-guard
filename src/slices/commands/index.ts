@@ -87,10 +87,17 @@ export function registerCommands(pi: ExtensionAPI, state: PluginState): void {
 					say(`secret-guard: enforce mode on (${isGlobal ? "global" : "project"})`);
 					return;
 				case "off":
+					// Only the user's own global file may disable the guard. A project
+					// file lives inside a repository and can arrive with a clone, so it
+					// may tighten the policy but never switch enforcement off.
+					if (!isGlobal) {
+						say("secret-guard: refusing to disable per project. Use: /secret-guard off --global");
+						return;
+					}
 					state.config = { ...state.config, mode: "off" };
 					state.enabled = false;
 					persist(state.config);
-					say(`secret-guard: off (${isGlobal ? "global" : "project"})`);
+					say("secret-guard: off (global)");
 					return;
 				case "forget":
 					state.sessionWide.clear();

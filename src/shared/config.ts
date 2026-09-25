@@ -74,20 +74,40 @@ export function parseSecretRules(entries: string[]): SecretRule[] {
 	return rules;
 }
 
-function coerce(raw: unknown): Partial<GuardConfig> {
+/** Which config layer a value came from. Only the global layer may weaken. */
+type Layer = "global" | "project";
+
+function coerce(raw: unknown, layer: Layer): Partial<GuardConfig> {
 	if (typeof raw !== "object" || raw === null) return {};
 	const r = raw as Record<string, unknown>;
 	const out: Partial<GuardConfig> = {};
+	// A project config is a file inside a repository, so it can arrive from a
+	// clone. It may only tighten the guard; only the user's own global file may
+	// turn it down. `enforce` is the floor, and that is the whole point of the
+	// human-in-the-loop default.
+	const canWeaken = layer === "global";
 
-	if (r.mode === "enforce" || r.mode === "redact-only" || r.mode === "off") {
+	if (r.mode === "enforce") {
+		out.mode = "enforce";
+	} else if (canWeaken && (r.mode === "redact-only" || r.mode === "off")) {
 		out.mode = r.mode;
 	}
+
+	// Kept for both layers; `loadConfig` lets a project file shorten the window
+	// but never lengthen it, so a longer one only ever buys unattended time.
 	if (typeof r.approvalTimeoutMs === "number" && r.approvalTimeoutMs >= 0) {
 		out.approvalTimeoutMs = r.approvalTimeoutMs;
 	}
-	for (const key of ["allowWriteToSecrets", "redactOutput", "notify"] as const) {
-		if (typeof r[key] === "boolean") out[key] = r[key] as boolean;
+
+	// `redactOutput: false` weakens; `notify: false` is cosmetic and allowed.
+	if (typeof r.redactOutput === "boolean" && (canWeaken || r.redactOutput)) {
+		out.redactOutput = r.redactOutput;
 	}
+	if (typeof r.allowWriteToSecrets === "boolean") {
+		out.allowWriteToSecrets = r.allowWriteToSecrets;
+	}
+	if (typeof r.notify === "boolean") out.notify = r.notify;
+
 	for (const key of [
 		"allowPathPatterns",
 		"allowEnvNames",
@@ -101,10 +121,10 @@ function coerce(raw: unknown): Partial<GuardConfig> {
 	return out;
 }
 
-function readLayer(path: string): Partial<GuardConfig> {
+function readLayer(path: string, layer: Layer): Partial<GuardConfig> {
 	try {
 		if (!existsSync(path)) return {};
-		return coerce(JSON.parse(readFileSync(path, "utf8")));
+		return coerce(JSON.parse(readFileSync(path, "utf8")), layer);
 	} catch {
 		return {};
 	}
@@ -112,11 +132,16 @@ function readLayer(path: string): Partial<GuardConfig> {
 
 /** defaults <- global <- project. `globalPath` exists so tests stay hermetic. */
 export function loadConfig(cwd?: string, globalPath: string = GLOBAL_CONFIG_PATH): GuardConfig {
-	const merged: GuardConfig = {
-		...DEFAULT_CONFIG,
-		...readLayer(globalPath),
-		...(cwd ? readLayer(projectConfigPath(cwd)) : {}),
-	};
+	const global = readLayer(globalPath, "global");
+	const project = cwd ? readLayer(projectConfigPath(cwd), "project") : {};
+	const base: GuardConfig = { ...DEFAULT_CONFIG, ...global };
+	const merged: GuardConfig = { ...base, ...project };
+
+	// A project file may shorten the approval window but never lengthen it, so
+	// the comparison is against the pre-project value, not the merged one.
+	if (typeof project.approvalTimeoutMs === "number") {
+		merged.approvalTimeoutMs = Math.min(base.approvalTimeoutMs, project.approvalTimeoutMs);
+	}
 	// An empty allowlist in a project file means "inherit", not "allow nothing".
 	if (!merged.allowEnvNames.length) merged.allowEnvNames = DEFAULT_CONFIG.allowEnvNames;
 	return merged;
