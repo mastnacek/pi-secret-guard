@@ -60,7 +60,6 @@ for internal tokens no prefix rule knows about. Placeholders
 
 Cascade: defaults ← `~/.pi/agent/pi-secret-guard.json` ←
 `<cwd>/.pi/pi-secret-guard.json` (project wins).
-
 ```json
 {
   "mode": "enforce",
@@ -87,6 +86,23 @@ counters and the recent block list. `/secret-guard on|off` changes the mode;
 `/secret-guard off --global` persists it for every session, without the flag it
 lands in the current project. `/secret-guard forget` clears the session
 approvals.
+
+### `enforce` is a floor, not just a default
+
+`mode: "enforce"` is the default, but it is also the weakest value a **project**
+config may set. A project config is a file inside a repository, so it can arrive
+with a clone — and any repo shipping `.pi/pi-secret-guard.json` with
+`{"mode": "off"}` would otherwise switch your guard off silently. So:
+
+- only the global file (yours) may set `off` or `redact-only`
+- a project may set `mode: "enforce"` and may shorten `approvalTimeoutMs`, but
+  never lengthen it
+- a project may not set `redactOutput: false`; it may tighten
+  `allowWriteToSecrets` to `false`
+- `/secret-guard off` without `--global` is refused, with the fix spelled out
+
+Verified: shipped default `enforce / 5000 ms`, no config anywhere `enforce`,
+hostile project file `{"mode":"off"}` → still `enforce`.
 
 The model also gets `pi_secret_guard_check`, which answers "would you block
 this path or command?" without running it — so it can find out before spending a
