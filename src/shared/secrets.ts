@@ -12,13 +12,19 @@ export interface SecretRule {
 	re: RegExp;
 	/** When set, only capture group N is kept; the rest of the match is replaced. */
 	group?: number;
+	/**
+	 * When set with `group`, this capture is tested for placeholder-ness before
+	 * the rule fires. A URL like `postgres://user:password@localhost` is a
+	 * template, not a leak, and must survive intact.
+	 */
+	placeholderGroup?: number;
 	/** Replacement used when the rule fires. */
 	replacement?: string;
 }
 
 /** Values that are obviously placeholders rather than live secrets. */
 const PLACEHOLDER_RE =
-	/^(?:[x*.]{3,}|<[^>]*>|\$\{[^}]*\}|\{\{[^}]*\}\}|%[^%]*%|(?:your|my|the|some|example|sample|test|dummy|fake|placeholder|redacted|changeme|todo)[-_ ]?[a-z0-9_-]*|none|null|true|false|undefined|empty|insert|xxx+)$/i;
+	/^(?:[x*.]{3,}|<[^>]*>|\$\{[^}]*\}|\{\{[^}]*\}\}|%[^%]*%|(?:your|my|the|some|example|sample|test|dummy|fake|placeholder|redacted|changeme|todo)[-_ ]?[a-z0-9_-]*|password|passwd|pass|secret|admin|guest|default|root|user|none|null|true|false|undefined|empty|insert|xxx+)$/i;
 
 /** Marker shape this plugin emits, used to make redaction idempotent. */
 const MARKER_RE = /«secret-guard:[^»]*»/g;
@@ -60,10 +66,13 @@ export const SECRET_RULES: SecretRule[] = [
 	{ kind: "huggingface-token", re: /\bhf_[A-Za-z0-9]{30,}/g },
 	{ kind: "jwt", re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
 	// Keep the scheme (and the trailing `@`) so the line still reads as a URL.
+	// The password half is what gets tested, so `user:password@localhost` in a
+	// template survives while `user:s3cr3tp4ss@github.com` does not.
 	{
 		kind: "basic-auth-url",
-		re: /(\b[a-z][a-z0-9+.-]*:\/\/)[^\s:@/]+:[^\s@/]{3,}(?=@)/gi,
+		re: /(\b[a-z][a-z0-9+.-]*:\/\/)([^\s:@/]+):([^\s@/]{3,})(?=@)/gi,
 		group: 1,
+		placeholderGroup: 3,
 	},
 	{ kind: "bearer-token", re: /\b(Bearer\s+)[A-Za-z0-9._~+/-]{20,}=*/g, group: 1 },
 ];
@@ -109,6 +118,10 @@ export function redactSecrets(
 			if (rule.group !== undefined) {
 				const kept = args[rule.group] as string | undefined;
 				if (typeof kept !== "string") return whole;
+				if (rule.placeholderGroup !== undefined) {
+					const candidate = args[rule.placeholderGroup];
+					if (typeof candidate === "string" && isPlaceholder(candidate)) return whole;
+				}
 				kinds.add(rule.kind);
 				count++;
 				return kept + replacement;

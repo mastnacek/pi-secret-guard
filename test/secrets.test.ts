@@ -70,6 +70,32 @@ test("redacts credentials embedded in URLs but keeps the scheme", () => {
 	assert.ok(out.text.endsWith("@github.com/o/r.git"));
 });
 
+test("a template URL with a placeholder password survives intact", () => {
+	for (const line of [
+		"DATABASE_URL=postgres://user:password@localhost:5432/db",
+		"DATABASE_URL=mysql://root:changeme@127.0.0.1:3306/app",
+		"DATABASE_URL=postgres://admin:admin@db.internal:5432/prod",
+		"REDIS_URL=redis://:your-password@cache:6379",
+	]) {
+		const out = redactSecrets(line);
+		assert.equal(out.count, 0, `unexpected redaction in: ${line}`);
+		assert.equal(out.text, line);
+	}
+});
+
+test("a real URL password is still redacted", () => {
+	const out = redactSecrets("DATABASE_URL=postgres://appuser:Tr0ub4dor3xyz@db:5432/prod");
+	assert.equal(out.count, 1);
+	assert.ok(!out.text.includes("Tr0ub4dor3xyz"));
+	assert.ok(out.text.includes("postgres://«secret-guard:basic-auth-url»"));
+	assert.ok(out.text.endsWith("@db:5432/prod"));
+});
+
+test("the generic rule does not fire on a bare weak secret", () => {
+	assert.equal(redactSecrets("password: password").count, 0);
+	assert.equal(redactSecrets("admin_password: admin").count, 0);
+});
+
 test("redacts bearer tokens and JWTs", () => {
 	assert.ok(scrubbed("Authorization: Bearer abcdefghij0123456789ABCDEFGH"));
 	assert.ok(scrubbed("eyJhbGciOiJIUzI1NiIs.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2Q"));
