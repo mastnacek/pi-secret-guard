@@ -11,14 +11,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { checkPath, checkShellCommand } from "../../shared/patterns.js";
-import { inspectToolCall } from "../../shared/inspect.js";
+import { CHECK_TOOL_NAME, inspectToolCall } from "../../shared/inspect.js";
 import type { PluginState } from "../../shared/state.js";
 
 const KindSchema = StringEnum(["path", "command"] as const);
 
 export function registerTools(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerTool({
-		name: "pi_secret_guard_check",
+		name: CHECK_TOOL_NAME,
 		label: "Secret guard check",
 		description:
 			"Ask the secret guard what it would do with a file path or shell command, without " +

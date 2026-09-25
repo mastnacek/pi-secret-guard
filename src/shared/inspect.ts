@@ -29,6 +29,23 @@ const PATH_TOOLS = new Set(["read", "edit", "write", "read_all"]);
 /** Tools whose job is to run shell text. */
 const SHELL_TOOLS = new Set(["bash", "powershell", "shell", "user_bash"]);
 
+/**
+ * Name of this plugin's own advisory tool. Kept in shared so the sweep below
+ * and the tool registration cannot drift apart.
+ */
+export const CHECK_TOOL_NAME = "pi_secret_guard_check";
+
+/**
+ * Tools this plugin registers itself.
+ *
+ * The advisory tool takes a path or a command as an argument and answers "would
+ * you block this?" without reading anything. Sweeping its input would mean the
+ * guard could not even be *asked* about a secret path — which is the one case
+ * where the model needs an answer. It only ever reports a verdict, so exempting
+ * it grants no new access to the underlying file.
+ */
+const SELF_TOOLS = new Set([CHECK_TOOL_NAME]);
+
 function violation(tool: string, reason: string, target: string): Violation {
 	return {
 		reason,
@@ -81,6 +98,9 @@ export function inspectToolCall(
 ): Violation | null {
 	try {
 		const args = (input ?? {}) as Record<string, unknown>;
+
+		// Our own advisory tool is exempt: it never reads, it only reports.
+		if (SELF_TOOLS.has(toolName)) return null;
 
 		if (PATH_TOOLS.has(toolName)) {
 			const raw = typeof args.path === "string" ? args.path : "";

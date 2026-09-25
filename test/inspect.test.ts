@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inspectToolCall } from "../src/shared/inspect.js";
+import { inspectToolCall, CHECK_TOOL_NAME } from "../src/shared/inspect.js";
 import {
 	DEFAULT_CONFIG,
 	loadConfig,
@@ -10,6 +10,40 @@ import {
 import { createInitialState, grantKey, recordBlock } from "../src/shared/state.js";
 
 const cfg = (over: Partial<GuardConfig> = {}): GuardConfig => ({ ...DEFAULT_CONFIG, ...over });
+
+test("the advisory tool is never blocked, even for a secret path", () => {
+	// The regression: the guard could not be *asked* about a secret path,
+	// because the path sat inside the checker's own arguments.
+	for (const target of [
+		"C:/Users/u/.ssh/id_ed25519",
+		"/home/u/.aws/credentials",
+		"/srv/app/.env",
+	]) {
+		assert.equal(
+			inspectToolCall(CHECK_TOOL_NAME, { kind: "path", value: target }, cfg()),
+			null,
+			`checker must be exempt for ${target}`,
+		);
+	}
+	// A command argument gets the same exemption.
+	assert.equal(
+		inspectToolCall(CHECK_TOOL_NAME, { kind: "command", value: "printenv | grep KEY" }, cfg()),
+		null,
+	);
+});
+
+test("the exemption is narrow — it does not leak to other tools", () => {
+	const args = { kind: "path", value: "/srv/app/.env" };
+	// A lookalike name is still swept.
+	assert.ok(inspectToolCall(CHECK_TOOL_NAME + "_x", args, cfg()));
+	assert.ok(inspectToolCall("mcp__fs__read", args, cfg()));
+	// And the real read tool is still guarded.
+	assert.ok(inspectToolCall("read", { path: "/srv/app/.env" }, cfg()));
+});
+
+test("the checker name lives in exactly one place", () => {
+	assert.equal(CHECK_TOOL_NAME, "pi_secret_guard_check");
+});
 
 test("read of .env is a violation; write of .env is not", () => {
 	assert.ok(inspectToolCall("read", { path: "app/.env" }, cfg()));
