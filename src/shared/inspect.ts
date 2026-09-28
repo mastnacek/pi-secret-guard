@@ -71,6 +71,29 @@ function stringLeaves(value: unknown, out: string[], depth = 0): void {
 	}
 }
 
+/**
+ * Glob match over tool names, supporting `*` and `?`.
+ *
+ * MCP tool names are `server__tool` and plugin tools are plain, so `*` has to
+ * cross the double underscore too; the anchored full-name match of the env
+ * layer is not reusable here.
+ */
+function toolNameMatches(name: string, pattern: string): boolean {
+	const rx = new RegExp(
+		`^${pattern
+			.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+			.replace(/\*/g, ".*")
+			.replace(/\?/g, ".")}$`,
+		"i",
+	);
+	return rx.test(name);
+}
+
+/** True when a user exemption glob covers this tool. */
+export function isExemptTool(toolName: string, patterns: string[] = []): boolean {
+	return patterns.some((p) => p.length > 0 && toolNameMatches(toolName, p));
+}
+
 /** Tokens in a shell command that could be a path argument. */
 const SHELL_PATH_TOKEN = /(?:[~.]?[\w.\-]*[/\\][^\s"'`;|&<>()]*|\.env[\w.\-]*|[\w.\-]+\.(?:pem|key|p12|pfx|jks|ppk|keytab|asc|gpg|ovpn|p8|p9))/gi;
 
@@ -101,6 +124,12 @@ export function inspectToolCall(
 
 		// Our own advisory tool is exempt: it never reads, it only reports.
 		if (SELF_TOOLS.has(toolName)) return null;
+
+		// A user-configured exemption. This is the documented way out of a whole
+		// false-positive class: a tool whose arguments are source code rather than
+		// paths or shell text. Only layer 1 is skipped; output redaction is a
+		// separate hook and still runs on this tool's results.
+		if (isExemptTool(toolName, config.exemptTools)) return null;
 
 		if (PATH_TOOLS.has(toolName)) {
 			const raw = typeof args.path === "string" ? args.path : "";

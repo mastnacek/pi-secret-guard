@@ -1,6 +1,6 @@
 {
   "name": "pi-secret-guard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Global guard for the Pi coding agent: blocks .env and credential reads with human-in-the-loop approval, and redacts secret-shaped values out of tool output",
   "type": "module",
   "main": "./index.ts",
@@ -23,6 +23,7 @@
     "index.ts",
     "src",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "package.json"
   ],

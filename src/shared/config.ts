@@ -36,6 +36,16 @@ export interface GuardConfig {
 	extraEnvDumpPatterns: string[];
 	/** Extra value rules for layer 3, user-supplied as `kind::regex` pairs. */
 	extraSecretRules: string[];
+	/**
+	 * Tool-name globs that skip layer 1 entirely.
+	 *
+	 * The escape hatch for a tool whose payload is not shell text: an editor's
+	 * `insert` receives source code, and a JS template interpolation such as
+	 * a dollar-brace expression reads to the env layer as a variable reference.
+	 * Exempting a tool removes *input* inspection only — layer 2 still redacts
+	 * its output. Global layer only: a project file may not weaken the guard.
+	 */
+	exemptTools: string[];
 }
 
 export const GLOBAL_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-secret-guard.json");
@@ -56,6 +66,7 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	allowEnvNames: ["PI_*", "NODE_OPTIONS", "TERM", "SHELL", "USER", "HOME", "PWD"],
 	extraEnvDumpPatterns: [],
 	extraSecretRules: [],
+	exemptTools: [],
 };
 
 /** Parse `kind::regex` strings into rules, skipping malformed entries. */
@@ -117,6 +128,15 @@ function coerce(raw: unknown, layer: Layer): Partial<GuardConfig> {
 		if (Array.isArray(r[key])) {
 			out[key] = (r[key] as unknown[]).filter((v): v is string => typeof v === "string");
 		}
+	}
+
+	// An exemption is a hole in layer 1, so it is global-only for the same
+	// reason `mode: "off"` is: a cloned project must not be able to switch the
+	// guard off by dropping tool names into a file.
+	if (canWeaken && Array.isArray(r.exemptTools)) {
+		out.exemptTools = (r.exemptTools as unknown[]).filter(
+			(v): v is string => typeof v === "string" && v.length > 0,
+		);
 	}
 	return out;
 }

@@ -20,7 +20,7 @@ import {
 } from "../../shared/config.js";
 import { truncate, type PluginState } from "../../shared/state.js";
 
-const ACTIONS = ["status", "on", "off", "forget", "allow"] as const;
+const ACTIONS = ["status", "on", "off", "forget", "allow", "exempt"] as const;
 type Action = (typeof ACTIONS)[number];
 
 const ACTION_HELP: Record<Action, string> = {
@@ -29,7 +29,25 @@ const ACTION_HELP: Record<Action, string> = {
 	off: "disable the guard",
 	forget: "clear every approval granted this session",
 	allow: "show how to extend the allowlists",
+	exempt: "exempt a tool from input inspection (add|remove|list|clear)",
 };
+
+/**
+ * Sub-actions of `/secret-guard exempt`.
+ *
+ * `add` and `remove` take one more argument, so their completion value ends in a
+ * space (Trailing Space Contract); `list` and `clear` are leaves and do not.
+ */
+const EXEMPT_ACTIONS = ["add", "remove", "list", "clear"] as const;
+const EXEMPT_HELP: Record<(typeof EXEMPT_ACTIONS)[number], string> = {
+	add: "skip input inspection for one tool name or glob",
+	remove: "drop one exemption",
+	list: "show the current exemptions",
+	clear: "drop every exemption",
+};
+
+const isLeaf = (a: (typeof EXEMPT_ACTIONS)[number]): boolean =>
+	a === "list" || a === "clear";
 
 function describe(config: GuardConfig, state: PluginState, cwd: string): string {
 	const lines = [
@@ -49,17 +67,113 @@ function describe(config: GuardConfig, state: PluginState, cwd: string): string 
 			lines.push(`  ${item.tool} · ${item.reason} · ${truncate(item.target, 60)}`);
 		}
 	}
+	if (config.exemptTools.length) {
+		lines.push(
+			"",
+			"exempt tools (no input inspection):",
+			...config.exemptTools.map((t) => `  ${t}`),
+		);
+	}
 	if (config.allowPathPatterns.length) {
 		lines.push("", "allowed paths:", ...config.allowPathPatterns.map((p) => `  ${p}`));
 	}
 	return lines.join("\n");
 }
+/**
+ * `/secret-guard exempt <add|remove|list|clear> [tool]`.
+ *
+ * An exemption is a hole in layer 1, so it is global-only for the same reason
+ * `off` is: a project file arrives with a clone, and a clone must not be able to
+ * switch inspection off by listing tool names. `persist` is threaded in so the
+ * handler keeps one cascade contract, and the project refusal is enforced here
+ * rather than twice at the call site.
+ */
+function handleExempt(
+	tokens: string[],
+	isGlobal: boolean,
+	state: PluginState,
+	say: (text: string) => void,
+	persist: (config: GuardConfig) => void,
+): void {
+	const sub = (tokens[1] ?? "list") as (typeof EXEMPT_ACTIONS)[number];
+	const name = tokens.slice(2).find((t) => !t.startsWith("--")) ?? "";
+	const current = state.config.exemptTools;
+
+	if (!EXEMPT_ACTIONS.includes(sub)) {
+		say(`unknown exempt action "${sub}". Try: ${EXEMPT_ACTIONS.join(", ")}`);
+		return;
+	}
+
+	if (sub === "list") {
+		say(
+			current.length
+				? current.map((t) => `exempt: ${t}`).join("\n")
+				: "secret-guard: no tool exemptions",
+		);
+		return;
+	}
+
+	if (!isGlobal) {
+		say(
+			"secret-guard: exemptions are global-only. Use: /secret-guard exempt " +
+				`${sub}${name ? " " + name : ""} --global`,
+		);
+		return;
+	}
+
+	if (sub === "clear") {
+		state.config = { ...state.config, exemptTools: [] };
+		persist(state.config);
+		say("secret-guard: all tool exemptions cleared (global)");
+		return;
+	}
+
+	if (!name) {
+		say(
+			`secret-guard: exempt ${sub} needs a tool name, ` +
+				"e.g. /secret-guard exempt add insert --global",
+		);
+		return;
+	}
+
+	const next =
+		sub === "add"
+			? current.includes(name)
+				? current
+				: [...current, name]
+			: current.filter((t) => t !== name);
+	if (sub === "remove" && next.length === current.length) {
+		say(`secret-guard: no exemption for "${name}"`);
+		return;
+	}
+	state.config = { ...state.config, exemptTools: next };
+	persist(state.config);
+	say(
+		sub === "add"
+			? `secret-guard: input inspection off for ${name} (global). Output redaction still runs.`
+			: `secret-guard: ${name} guarded again (global)`,
+	);
+}
+
 
 export function registerCommands(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("secret-guard", {
 		description: "Pi secret guard — block .env and credential reads, redact secrets from output",
 		getArgumentCompletions: (arg) => {
 			const partial = arg.split(/\s+/).pop() ?? "";
+			const tokens = arg.trim().split(/\s+/).filter(Boolean);
+
+			// Second level: `/secret-guard exempt ` and its sub-actions. Tool names are
+			// free text, so no completion is offered past the sub-action itself.
+			if (tokens[0] === "exempt") {
+				// A tool name is free text; there is nothing to offer past the sub-action.
+				if (tokens.length > 1) return [];
+				return EXEMPT_ACTIONS.filter((a) => a.startsWith(partial)).map((a) => ({
+					value: isLeaf(a) ? `exempt ${a}` : `exempt ${a} `,
+					label: `${a} — ${EXEMPT_HELP[a]}`,
+				}));
+			}
+
 			if (arg.includes(" ")) return [];
 			return ACTIONS.filter((a) => a.startsWith(partial)).map((a) => ({
 				value: a,
@@ -104,6 +218,9 @@ export function registerCommands(pi: ExtensionAPI, state: PluginState): void {
 					state.grants.clear();
 					say("secret-guard: session approvals cleared");
 					return;
+				case "exempt":
+					handleExempt(tokens, isGlobal, state, say, persist);
+					return;
 				case "allow":
 					say(
 						[
@@ -113,6 +230,7 @@ export function registerCommands(pi: ExtensionAPI, state: PluginState): void {
 								cwd +
 								'/fixtures"]',
 							'  "allowEnvNames": ["PI_*", "MY_APP_KEY"]',
+							'  "exemptTools": ["insert", "replace"]',
 						].join("\n"),
 					);
 					return;

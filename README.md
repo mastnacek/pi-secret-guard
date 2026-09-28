@@ -69,7 +69,8 @@ Cascade: defaults ← `~/.pi/agent/pi-secret-guard.json` ←
   "allowPathPatterns": [],
   "allowEnvNames": ["PI_*"],
   "extraEnvDumpPatterns": [],
-  "extraSecretRules": ["internal-token::INT-[0-9]{8}"]
+  "extraSecretRules": ["internal-token::INT-[0-9]{8}"],
+  "exemptTools": ["insert", "replace"]
 }
 ```
 
@@ -80,12 +81,52 @@ Cascade: defaults ← `~/.pi/agent/pi-secret-guard.json` ←
 - `allowPathPatterns` — path substrings that bypass the path rules.
 - `allowEnvNames` — name globs (`MY_*`) that bypass the variable rules.
 - `extraSecretRules` — `kind::regex` pairs appended to the value rules.
+- `exemptTools` — tool-name globs skipped by layer 1. See below.
+
+### When a tool is blocked for the wrong reason
+
+The guard has schemas for `read`/`edit`/`write`/`read_all` and for the
+shell tools. **Every other tool — any extension tool, any MCP tool — is swept
+string by string**, because there is no schema to read. That sweep applies the
+shell rules too, which is deliberate (under-matching is a leak) and is also
+where false positives come from. The one seen in practice: an editor tool's
+argument is a line of source code, and a dollar-brace interpolation inside it
+reads to the env layer as a variable reference. `pi-hashline-edit-pro`'s
+`insert` taking a template literal naming something called `key` is denied as
+"secret env var (KEY)" — the payload is code, and no secret is involved.
+
+Two ways out. Detect first:
+
+```
+pi_secret_guard_check(kind: "tool", tool: "insert", value: '{"anchor":"ldSI","lines":["…"]}')
+```
+
+replays the exact sweep the real call would hit, so a denial is known before
+the call is sent instead of after. Then exempt the tool:
+
+```
+/secret-guard exempt add insert --global
+/secret-guard exempt list
+/secret-guard exempt remove insert --global
+/secret-guard exempt clear --global
+```
+
+An exemption removes **input** inspection for that tool only; output
+redaction still runs on its results. Like `mode: "off"`, it is global-only: a
+project file may not exempt tools, so a clone cannot switch inspection off.
+Globs are supported (`mcp__*`, `*_edit`), matched case-insensitively against the
+whole tool name.
+
+The narrower fix is to rephrase the payload: string concatenation instead of
+a template literal, or a different parameter name. Prefer that when one edit
+does it — an exemption is a hole in layer 1, and a hole is worth as small as
+the false positive requires.
 
 `/secret-guard status` prints the effective config, the block/redaction
 counters and the recent block list. `/secret-guard on|off` changes the mode;
 `/secret-guard off --global` persists it for every session, without the flag it
-lands in the current project. `/secret-guard forget` clears the session
-approvals.
+lands in the current project. `/secret-guard forget` clears the session approvals.
+
 
 ### `enforce` is a floor, not just a default
 

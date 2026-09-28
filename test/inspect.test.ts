@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inspectToolCall, CHECK_TOOL_NAME } from "../src/shared/inspect.js";
+import { inspectToolCall, isExemptTool, CHECK_TOOL_NAME } from "../src/shared/inspect.js";
 import {
 	DEFAULT_CONFIG,
 	loadConfig,
@@ -8,6 +8,22 @@ import {
 	type GuardConfig,
 } from "../src/shared/config.js";
 import { createInitialState, grantKey, recordBlock } from "../src/shared/state.js";
+
+/**
+ * A JS template interpolation, written without the literal two-character opener.
+ *
+ * The editor tool that ships as `pi-hashline-edit-pro` takes source code in its
+ * `lines` argument, and the env layer reads a dollar-brace expression as a variable
+ * reference. That collision is the false positive this file pins down.
+ */
+const OPENER = "$" + "{";
+const TEMPLATE_LINE =
+	"const path = prefix ? `" +
+	OPENER +
+	"prefix}." +
+	OPENER +
+	"key}`" +
+	" : key;";
 
 const cfg = (over: Partial<GuardConfig> = {}): GuardConfig => ({ ...DEFAULT_CONFIG, ...over });
 
@@ -245,4 +261,82 @@ test("a corrupt config file falls back to defaults instead of failing open silen
 	assert.equal(loadConfig(project, globalPath).mode, "enforce");
 
 	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a source-code payload trips the env layer, and an exemption clears it", () => {
+	// The exact shape that blocked an `insert`: an unknown tool whose argument is a
+	// line of JavaScript. The guard has no schema for it, so every string leaf is
+	// swept, and the dollar-brace interpolation reads as a variable named KEY.
+	const payload = { anchor: "ldSI", lines: [TEMPLATE_LINE] };
+	const found = inspectToolCall("insert", payload, cfg());
+	assert.ok(found, "the regression: this must be what the guard sees");
+	assert.equal(found?.reason, "secret env var (KEY)");
+	assert.equal(found?.target, TEMPLATE_LINE);
+
+	// The escape hatch: exempt the tool, and the same payload goes through.
+	assert.equal(inspectToolCall("insert", payload, cfg({ exemptTools: ["insert"] })), null);
+
+	// A near-miss name is still swept, so the exemption cannot widen by accident.
+	assert.ok(inspectToolCall("insert_file", payload, cfg({ exemptTools: ["insert"] })));
+});
+
+test("an exemption on one tool leaves every other tool swept", () => {
+	// The sweep for a non-exempt tool is byte-for-byte the old behaviour: same
+	// payload, same verdict, exemption list present.
+	const payload = { options: { nested: [TEMPLATE_LINE] } };
+	const withList = inspectToolCall("mcp__other__write", payload, cfg({ exemptTools: ["insert"] }));
+	const withoutList = inspectToolCall("mcp__other__write", payload, cfg());
+	assert.deepEqual(withList, withoutList);
+	assert.ok(withList);
+});
+
+test("tool exemptions match globs, case-insensitively", () => {
+	const payload = { lines: [TEMPLATE_LINE] };
+	assert.equal(
+		inspectToolCall("mcp__editor__insert", payload, cfg({ exemptTools: ["mcp__*"] })),
+		null,
+	);
+	assert.equal(inspectToolCall("INSERT", payload, cfg({ exemptTools: ["insert"] })), null);
+});
+
+test("isExemptTool ignores an empty pattern instead of matching everything", () => {
+	assert.equal(isExemptTool("insert", [""]), false);
+	assert.equal(isExemptTool("insert", []), false);
+	assert.equal(isExemptTool("insert", ["*"]), true);
+});
+
+test("an exemption is global-only, exactly like mode: off", async () => {
+	const { projectConfigPath } = await import("../src/shared/config.js");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "sg-exempt-"));
+	const globalPath = path.join(root, "pi-secret-guard.json");
+	const project = path.join(root, "repo");
+	fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+
+	// A clone must not be able to switch input inspection off.
+	fs.writeFileSync(
+		projectConfigPath(project),
+		JSON.stringify({ exemptTools: ["*"], mode: "off" }),
+		"utf8",
+	);
+	const fromClone = loadConfig(project, globalPath);
+	assert.deepEqual(fromClone.exemptTools, [], "a project file may not exempt tools");
+	assert.equal(fromClone.mode, "enforce");
+
+	// The user's own global file may.
+	fs.writeFileSync(globalPath, JSON.stringify({ exemptTools: ["insert", "mcp__*"] }), "utf8");
+	assert.deepEqual(loadConfig(project, globalPath).exemptTools, ["insert", "mcp__*"]);
+
+	// Non-string and empty entries are dropped rather than widening the glob.
+	fs.writeFileSync(globalPath, JSON.stringify({ exemptTools: ["insert", "", 7, null] }), "utf8");
+	assert.deepEqual(loadConfig(project, globalPath).exemptTools, ["insert"]);
+
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("the shipped default exempts nothing", () => {
+	assert.deepEqual(DEFAULT_CONFIG.exemptTools, []);
 });
