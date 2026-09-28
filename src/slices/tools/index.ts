@@ -25,9 +25,20 @@ const KindSchema = StringEnum(["path", "command", "tool"] as const);
  * is kept as a bare string leaf rather than rejected: the sweep would read it the
  * same way.
  */
-function parsePayload(value: string): unknown {
+/**
+ * A parsed tool argument, or the raw text when it is not JSON at all.
+ *
+ * Named rather than left as `unknown`: the payload is JSON by construction, and
+ * the sweep is the only consumer, but the boundary still deserves a type.
+ */
+type ToolPayload = JsonValue | { value: string };
+
+/** Recursive JSON shape, which is all a tool call payload can be. */
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+function parsePayload(value: string): ToolPayload {
 	try {
-		return JSON.parse(value);
+		return JSON.parse(value) as JsonValue;
 	} catch {
 		return { value };
 	}
